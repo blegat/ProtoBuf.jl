@@ -433,7 +433,8 @@ function writeproto(io::IO, obj, meta::ProtoMeta=meta(typeof(obj)))
 end
 
 function read_lendelim_packed(io, fld::Vector{T}, reader) where {T}
-    iob = IOBuffer(read_bytes(io))
+    iob = LazyRead(io)
+    sizehint!(fld, div(iob.left, sizeof(T)))
     while !eof(iob)
         val = reader(iob, T)
         push!(fld, val)
@@ -441,9 +442,38 @@ function read_lendelim_packed(io, fld::Vector{T}, reader) where {T}
     nothing
 end
 
-function read_lendelim_obj(io, val, meta::ProtoMeta, reader)
-    fld_buf = read_bytes(io)
-    reader(IOBuffer(fld_buf), val, meta)
+mutable struct LazyRead{I} <: IO
+    io::I
+    left::UInt64
+end
+function LazyRead(io::LazyRead)
+    # This lines decreases `io.left` of the length of the encoding
+    # of `n` which is between 1 and `sizeof(UInt64) = 8`.
+    n = _read_uleb(io, UInt64)
+    @assert io.left >= n
+    io.left -= n
+    return LazyRead(io.io, n)
+end
+function lazy_read(io::LazyRead)
+    n = _read_uleb(io, UInt64)
+    @assert io.left >= n
+    io.left -= n
+    return
+end
+function LazyRead(io::IO)
+    n = _read_uleb(io, UInt64)
+    return LazyRead(io, n)
+end
+function Base.eof(io::LazyRead)
+    return eof(io.io) || io.left <= 0
+end
+function Base.read(io::LazyRead, ::Type{UInt8})
+    io.left -= 1
+    return read(io.io, UInt8)
+end
+
+function read_lendelim_obj(io, val, meta::ProtoMeta)
+    readproto(LazyRead(io), val, meta)
     val
 end
 
@@ -452,7 +482,7 @@ instantiate(t::Type{T}) where {T <: ProtoType} = T()
 
 function skip_field(io::IO, wiretype::Integer)
     if wiretype == WIRETYP_LENDELIM
-        read_bytes(io)
+        lazy_read(io)
     elseif wiretype == WIRETYP_64BIT
         read_fixed(io, UInt64)
     elseif wiretype == WIRETYP_32BIT
@@ -487,7 +517,7 @@ function read_field(io, container, attrib::ProtoMetaAttribs, wiretyp, jtyp_speci
         if isbitstype(jtyp) && (wiretyp == WIRETYP_LENDELIM)
             read_lendelim_packed(io, arr_val, rfn)
         elseif ptyp === :obj
-            push!(arr_val, read_lendelim_obj(io, instantiate(jtyp), attrib.meta, rfn))
+            push!(arr_val, read_lendelim_obj(io, instantiate(jtyp), attrib.meta))
         else
             push!(arr_val, rfn(io, jtyp))
         end
@@ -497,7 +527,7 @@ function read_field(io, container, attrib::ProtoMetaAttribs, wiretyp, jtyp_speci
 
         if ptyp === :obj
             val_obj = ((container !== nothing) && hasproperty(container, fld)) ? getproperty(container, fld) : instantiate(jtyp)
-            return read_lendelim_obj(io, val_obj, attrib.meta, rfn)
+            return read_lendelim_obj(io, val_obj, attrib.meta)
         elseif ptyp === :map
             val_map = ((container !== nothing) && hasproperty(container, fld)) ? convert(jtyp, getproperty(container, fld)) : jtyp()
             return read_map(io, val_map)
