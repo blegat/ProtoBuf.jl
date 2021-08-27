@@ -433,30 +433,35 @@ function writeproto(io::IO, obj, meta::ProtoMeta=meta(typeof(obj)))
 end
 
 function read_lendelim_packed(io, fld::Vector{T}, reader) where {T}
-    iob = LazyRead(io)
-    sizehint!(fld, div(iob.left, sizeof(T)))
-    while !eof(iob)
-        val = reader(iob, T)
+    n = _read_uleb(io, UInt64)
+    left = io.left - n
+    io.left = n
+    sizehint!(fld, length(fld) + div(n, sizeof(T)))
+    while !eof(io)
+        val = reader(io, T)
         push!(fld, val)
     end
-    nothing
+    io.left = left
+    return
 end
 
 mutable struct LazyRead{I} <: IO
     io::I
     left::UInt64
 end
-function LazyRead(io::LazyRead)
-    # This lines decreases `io.left` of the length of the encoding
-    # of `n` which is between 1 and `sizeof(UInt64) = 8`.
-    n = _read_uleb(io, UInt64)
-    @assert io.left >= n
-    io.left -= n
-    return LazyRead(io.io, n)
-end
+#function LazyRead(io::LazyRead)
+#    error()
+#    # This lines decreases `io.left` of the length of the encoding
+#    # of `n` which is between 1 and `sizeof(UInt64) = 8`.
+#    n = _read_uleb(io, UInt64)
+#    @assert io.left >= n
+#    io.left -= n
+#    return LazyRead(io.io, n)
+#end
 function lazy_read(io::LazyRead)
     n = _read_uleb(io, UInt64)
     @assert io.left >= n
+    skip(io, n)
     io.left -= n
     return
 end
@@ -472,6 +477,14 @@ function Base.read(io::LazyRead, ::Type{UInt8})
     return read(io.io, UInt8)
 end
 
+function read_lendelim_obj(io::LazyRead, val, meta::ProtoMeta)
+    n = _read_uleb(io, UInt64)
+    left = io.left - n
+    io.left = n
+    readproto(io, val, meta)
+    io.left = left
+    val
+end
 function read_lendelim_obj(io, val, meta::ProtoMeta)
     readproto(LazyRead(io), val, meta)
     val
